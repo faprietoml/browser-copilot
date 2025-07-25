@@ -98,6 +98,12 @@ export class Agent {
         return ret.summary
     }
 
+    public async cancelTask(sessionId: string, authService?: AuthService) {
+        const ret = await this.postJson(`${this.sessionUrl(sessionId)}/cancel`, {  }, authService)
+
+        return ret.text
+    }
+
 }
 
 export interface AgentManifest {

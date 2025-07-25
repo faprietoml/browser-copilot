@@ -1,8 +1,8 @@
 import logging
 import os
 import traceback
-from typing import AsyncIterator, Annotated, Optional
 
+from typing import AsyncIterator, Annotated, Optional
 from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -11,7 +11,7 @@ from sse_starlette.sse import ServerSentEvent
 
 from gpt_agent.agent import Agent, AgentAction
 from gpt_agent.auth import get_current_user
-from gpt_agent.domain import Session, Question, TranscriptionQuestion, SessionBase
+from gpt_agent.domain import Session, Question, TranscriptionQuestion, SessionBase, MessageChunk
 from gpt_agent.file_system_repos import SessionsRepository, QuestionsRepository, TranscriptionsRepository
 
 logging.basicConfig()
@@ -51,6 +51,21 @@ async def create_session(req: SessionBase, user: Annotated[str, Depends(get_curr
     return ret
 
 
+@app.post('/sessions/{session_id}/cancel')
+async def cancel_task(session_id: str, user: Annotated[str, Depends(get_current_user)]) -> Session:
+    logger.debug(f"Received a request to cancel a session with ID='{session_id}'...")
+
+    session = await _find_session(session_id, user)
+    logger.debug(f"Found a session with UUID='{session.id}'...")
+
+    # Registra el identificador de la sesión en el repositorio para que el agente pueda validar que hay una cancelación en proceso.
+    SessionsRepository.register_cancelled_session(session_id)
+    logger.debug(f"Added {session_id} to cancelled sessions list.")
+
+    # TODO: empty response
+    return session
+
+
 class QuestionRequest(BaseModel):
     question: Optional[str] = ""
 
@@ -79,18 +94,32 @@ async def agent_response_stream(req: QuestionRequest, session: Session) -> Async
     try:
         answer_stream = Agent(session).ask(req.question)
         complete_answer = ""
-        async for token in answer_stream:
-            if isinstance(token, str):
-                complete_answer = complete_answer + token
-                yield ServerSentEvent(data=token).encode()
+
+        async for item in answer_stream:
+            # import asyncio
+            # await asyncio.sleep(0.1)
+
+            if isinstance(item, str):
+                item_str = item
+
+                yield ServerSentEvent(data=item).encode()
+            elif isinstance(item, MessageChunk):
+                item_str = item.model_dump_json()
+
+                yield ServerSentEvent(data=item_str).encode()
             else:
-                complete_answer = complete_answer + token.model_dump_json()
-                yield ServerSentEvent(event="flow", data=token.model_dump_json()).encode()
-        ret = Question(question=req.question, answer=complete_answer, session=session)
-        await questions_repo.save_question(ret)
+                item_str = item.model_dump_json()
+
+                yield ServerSentEvent(event="flow", data=item_str).encode()
+
+            complete_answer += item_str
+
+        # Persistir la pregunta/respuesta en la sesión.
+        question_model = Question(question=req.question, answer=complete_answer, session=session)
+        await questions_repo.save_question(question_model)
     except Exception as e:
         traceback.print_exception(e)
-        yield ServerSentEvent(event="error").encode()
+        yield ServerSentEvent(event="error", data=str(e)).encode()
 
 
 class TranscriptionRequest(BaseModel):
@@ -102,7 +131,8 @@ class TranscriptionResponse(BaseModel):
 
 
 @app.post('/sessions/{session_id}/transcriptions')
-async def answer_transcription(session_id: str, req: TranscriptionRequest, user: Annotated[str, Depends(get_current_user)]) -> TranscriptionResponse:
+async def answer_transcription(session_id: str, req: TranscriptionRequest,
+                               user: Annotated[str, Depends(get_current_user)]) -> TranscriptionResponse:
     session = await _find_session(session_id, user)
     ret = TranscriptionQuestion(base64=req.file, session=session)
     audio_file_path = await transcriptions_repo.save_audio(ret)

@@ -1,5 +1,5 @@
 import uuid
-from typing import List
+from typing import List, Self
 
 from pydantic import BaseModel, Field
 
@@ -19,7 +19,13 @@ class Question(BaseModel):
     question: str
     answer: str
 
+
 class TranscriptionQuestion(BaseModel):
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     session: Session = Field(exclude=True)
     base64: str
+
+
+class MessageChunk(BaseModel):
+    type: str
+    value: str

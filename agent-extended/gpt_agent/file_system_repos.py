@@ -5,6 +5,7 @@ import base64
 import aiofiles
 import aiofiles.os
 import datetime
+
 from gpt_agent.domain import Session, Question, TranscriptionQuestion
 
 
@@ -33,6 +34,9 @@ async def _write_audio_file(file_name: str, body: str, session: Session):
 
 
 class SessionsRepository:
+    # Ids de las sessiones en proceso de cancelación. 
+    # En memoria, porque el iterador del callback del agente estará consultando si la sessión canceló la operación.
+    cancelled_sessions = []
 
     @staticmethod
     async def save_session(session: Session) -> None:
@@ -48,8 +52,19 @@ class SessionsRepository:
         async with aiofiles.open(os.path.join(session_path, 'session.json')) as f:
             session_dict = json.loads(await f.read())
             return Session(**session_dict)
+            
+    @staticmethod
+    def register_cancelled_session(session_id: str) -> None:
+      SessionsRepository.cancelled_sessions.append(session_id) 
 
-
+    @staticmethod
+    def unregister_cancelled_session(session_id: str) -> None:
+      SessionsRepository.cancelled_sessions.remove(session_id)
+      
+    @staticmethod
+    def is_session_cancelled(session_id: str) -> bool:
+      return session_id in SessionsRepository.cancelled_sessions
+    
 class QuestionsRepository:
 
     @staticmethod

@@ -156,6 +156,10 @@ export class AgentSession {
     }
   }
 
+  public async cancelTask(){
+    return await this.agent.cancelTask(this.id!, this.authService);
+  }
+
   public async resumeFlow(msgHandler: (text: string, complete: boolean) => void, errorHandler: (error: any) => void) {
     try {
       await new FlowExecutor(this.tabId, msgHandler).resumeFlow()

@@ -1,67 +1,86 @@
 <script lang="ts" setup>
-import { computed, nextTick, ref, onMounted, onBeforeUnmount } from 'vue'
-import { useI18n } from 'vue-i18n'
-import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js'
-import 'highlight.js/styles/base16/gigavolt.min.css'
-import MarkdownItPlantuml from 'markdown-it-plantuml'
-import { ExclamationCircleIcon, CircleFilledIcon } from 'vue-tabler-icons'
-import NewPromptButton from './NewPromptButton.vue'
-import CopyButton from './CopyButton.vue'
-import * as echarts from 'echarts'
-import moment from 'moment'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useI18n } from "vue-i18n";
+import MarkdownIt from "markdown-it";
+import hljs from "highlight.js";
+import "highlight.js/styles/base16/gigavolt.min.css";
+import MarkdownItPlantuml from "markdown-it-plantuml";
+import { CircleFilledIcon, ExclamationCircleIcon } from "vue-tabler-icons";
+import NewPromptButton from "./NewPromptButton.vue";
+import CopyButton from "./CopyButton.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
+import * as echarts from "echarts";
+import moment from "moment";
+import StopIcon from "./StopIcon.vue";
+import browser from "webextension-polyfill";
+import { findAgentSession } from "../scripts/agent-session-repository";
 
-const props = defineProps<{ text: string, file: Record<string, string>, isUser: boolean, isComplete: boolean, isSuccess: boolean, agentLogo: string, agentName: string, agentId: string }>()
-const { t } = useI18n()
-const renderedMsg = computed(() => props.isUser ? props.text.replaceAll('\n', '<br/>') : renderMarkDown(props.text))
+const props = defineProps<{
+  text: string,
+  file: Record<string, string>,
+  isUser: boolean,
+  isComplete: boolean,
+  isSuccess: boolean,
+  agentLogo: string,
+  agentName: string,
+  agentId: string,
+  reasoning?: string
+}>();
+const { t } = useI18n();
+
+const isCancelling = ref(false);
+
+const renderedReasoning = computed(() => props.isUser ? null : renderMarkDown(props.reasoning ?? ""));
+const renderedMsg = computed(() => props.isUser ? props.text.replaceAll("\n", "<br/>") : renderMarkDown(props.text));
 const messageElement = ref<HTMLElement | null>(null);
-const resizeObserver: ResizeObserver = new ResizeObserver(onResize)
+const resizeObserver: ResizeObserver = new ResizeObserver(onResize);
 var chart: any;
 var prevWidth: number = 0;
 
 function renderMarkDown(text: string) {
   let md = new MarkdownIt({
     highlight: (code: string, lang: string) => {
-      let ret = code
+      let ret = code;
       if (lang && hljs.getLanguage(lang)) {
         try {
-          ret = hljs.highlight(code, { language: lang }).value
-        } catch (__) { }
+          ret = hljs.highlight(code, { language: lang }).value;
+        } catch (__) {
+        }
       }
-      return '<pre><code class="hljs">' + ret + '</code></pre>'
+      return "<pre><code class=\"hljs\">" + ret + "</code></pre>";
     }
-  })
-  useTargetBlankLinks(md)
-  useEcharts(md)
-  md.use(MarkdownItPlantuml)
-  return md.render(text)
+  });
+  useTargetBlankLinks(md);
+  useEcharts(md);
+  md.use(MarkdownItPlantuml);
+  return md.render(text);
 }
 
 function useTargetBlankLinks(md: MarkdownIt) {
-  let defaultRender = md.renderer.rules.link_open || function (tokens, idx, options, env, self) {
-    return self.renderToken(tokens, idx, options)
-  }
-  md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
-    tokens[idx].attrSet('target', '_blank')
-    return defaultRender(tokens, idx, options, env, self)
-  }
+  let defaultRender = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
+    return self.renderToken(tokens, idx, options);
+  };
+  md.renderer.rules.link_open = function(tokens, idx, options, env, self) {
+    tokens[idx].attrSet("target", "_blank");
+    return defaultRender(tokens, idx, options, env, self);
+  };
 }
 
 function useEcharts(md: MarkdownIt) {
-  const defaultRender = md.renderer.rules.fence || function (tokens, idx, options, env, self) {
+  const defaultRender = md.renderer.rules.fence || function(tokens, idx, options, env, self) {
     return self.renderToken(tokens, idx, options);
   };
-  md.renderer.rules.fence = function (tokens, idx, options, env, self) {
+  md.renderer.rules.fence = function(tokens, idx, options, env, self) {
     const token = tokens[idx];
     const code = token.content.trim();
-    if (token.info === 'echarts') {
+    if (token.info === "echarts") {
       nextTick().then(() => {
         const container = messageElement.value!;
-        const chartDiv = container.querySelector('.echarts');
-        const chartData = container.querySelector('.echarts-data');
+        const chartDiv = container.querySelector(".echarts");
+        const chartData = container.querySelector(".echarts-data");
         if (chartDiv && chartData) {
           chart = echarts.init(chartDiv as HTMLDivElement);
-          const options = JSON.parse(chartData.textContent || '');
+          const options = JSON.parse(chartData.textContent || "");
           solveEchartsFormatter(options.xAxis.axisLabel);
           solveEchartsFormatter(options.xAxis.axisPointer.label);
           chart.setOption(options);
@@ -75,20 +94,20 @@ function useEcharts(md: MarkdownIt) {
 
 function solveEchartsFormatter(obj: any) {
   if (obj && obj.formatter) {
-    if (obj.formatter.name === 'formatEpoch') {
-      obj.formatter = formatEpoch(obj.formatter)
+    if (obj.formatter.name === "formatEpoch") {
+      obj.formatter = formatEpoch(obj.formatter);
     }
   }
 }
 
 function formatEpoch(config: any): (value: any) => string {
   return (value: any) => {
-    if (typeof value === 'object') {
+    if (typeof value === "object") {
       value = value.value;
     }
-    const time = moment(parseInt(value))
+    const time = moment(parseInt(value));
     return time.format(config.format);
-  }
+  };
 }
 
 function onResize() {
@@ -100,15 +119,26 @@ function onResize() {
 
 onMounted(() => {
   if (messageElement.value) {
-    resizeObserver.observe(messageElement.value)
+    resizeObserver.observe(messageElement.value);
   }
-})
+});
 
 onBeforeUnmount(() => {
   if (messageElement.value) {
-    resizeObserver.unobserve(messageElement.value)
+    resizeObserver.unobserve(messageElement.value);
   }
-})
+});
+
+const onCancel = async () => {
+  isCancelling.value = true;
+
+  const currentTab = await browser.tabs.getCurrent();
+  const agentSession = await findAgentSession(currentTab.id!);
+
+  console.log(`Canceling agent session '${agentSession?.id}'...`);
+
+  agentSession?.cancelTask();
+};
 </script>
 
 <template>
@@ -124,7 +154,7 @@ onBeforeUnmount(() => {
         <exclamation-circle-icon class="text-red-600" />
       </template>
 
-      <span class="text-base">{{ isUser ? t('you') : agentName }}</span>
+      <span class="text-base">{{ isUser ? t("you") : agentName }}</span>
       <div class="flex-auto flex justify-end">
         <CopyButton v-if="!isUser && text" :text="text" :html="renderedMsg" />
         <NewPromptButton v-if="isUser && text" :is-large-icon="false" :text="text" :agent-id="agentId" />
@@ -137,12 +167,30 @@ onBeforeUnmount(() => {
             <source :src="file.url" type="audio/webm">
           </audio>
         </template>
+
+        <template v-if="renderedReasoning">
+          <CollapsiblePanel on-open-title="Ocultar razonamiento" on-close-title="Mostrar razonamiento"
+                            :text-content="renderedReasoning" />
+        </template>
+
         <template v-if="text">
           <div v-html="renderedMsg" ref="messageElement"
-            class="flex flex-col text-sm font-light leading-tight gap-2 rendered-msg" />
+               class="flex flex-col text-sm font-light leading-tight gap-2 rendered-msg" />
         </template>
       </div>
-      <div class="ml-3 dot-pulse" v-if="!isComplete" />
+
+      <template v-if="!isComplete">
+        <div class="flex flex-row justify-items-center py-4">
+          <div class="grow flex items-center">
+            <div class="ml-3 dot-pulse" />
+          </div>
+
+          <div class="grow flex flex-row-reverse">
+            <StopIcon @click="onCancel" :is-disabled="isCancelling" />
+          </div>
+        </div>
+
+      </template>
     </div>
   </div>
 </template>
@@ -202,7 +250,7 @@ div a {
   padding: var(--half-spacing);
 }
 
-.rendered-msg>img {
+.rendered-msg > img {
   box-shadow: var(--shadow);
   border-radius: var(--spacing);
   width: fit-content;

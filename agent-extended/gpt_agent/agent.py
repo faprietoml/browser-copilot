@@ -3,20 +3,20 @@ import datetime
 import enum
 import logging
 import os
+
 from typing import List, AsyncIterator, Optional
 from pydantic import BaseModel
-
 from langchain.agents import Tool, OpenAIFunctionsAgent, AgentExecutor
+from langchain.agents.mrkl.base import ZeroShotAgent
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from langchain.memory import ConversationBufferMemory, FileChatMessageHistory
-from langchain.prompts import MessagesPlaceholder
-from langchain.schema import SystemMessage
+from langchain.schema.runnable import RunnableConfig
 from langchain.tools import tool
 from langchain_community.chat_models import AzureChatOpenAI, ChatOpenAI
 from openai import OpenAI, AzureOpenAI
 
-from gpt_agent.domain import Session
-from gpt_agent.file_system_repos import get_session_path
+from gpt_agent.domain import Session, MessageChunk
+from gpt_agent.file_system_repos import get_session_path, SessionsRepository
 
 logging.getLogger("openai").level = logging.DEBUG
 
@@ -62,27 +62,32 @@ def contact_abstracta(full_name: str) -> str:
 
 
 class Agent:
-
     def __init__(self, session: Session):
         self._session = session
         message_history = FileChatMessageHistory(get_session_path(session.id) + "/chat_history.json")
         self._memory = ConversationBufferMemory(memory_key="chat_history", chat_memory=message_history,
-                                                return_messages=True)
-        self._agent = self._build_agent(self._memory, [clock, contact_abstracta])
+                                                return_messages=True, output_key="output")
+        self._agent = self._build_agent(self._memory, [contact_abstracta])
 
     def _build_agent(self, memory: ConversationBufferMemory, tools: List[Tool]) -> AgentExecutor:
         llm = self._build_llm()
-        prompt = OpenAIFunctionsAgent.create_prompt(
-            system_message=SystemMessage(content=os.getenv("SYSTEM_PROMPT")),
-            extra_prompt_messages=[MessagesPlaceholder(variable_name=memory.memory_key)],
+
+        # Zero-shot significa que el agente no tiene memoria ni entrenamiento en las tareas,
+        # sino que basa sus decisiones únicamente en el prompt y las descripciones de las herramientas.
+        # En cada paso el agente sigue el patrón Thought → Action → Action Input → Observation, repitiendo hasta generar la respuesta final.
+        prompt = ZeroShotAgent.create_prompt(
+            tools=tools,
+            prefix=os.getenv("SYSTEM_PROMPT"),
         )
+
         agent = OpenAIFunctionsAgent(llm=llm, tools=tools, prompt=prompt)
+
         return AgentExecutor(
             agent=agent,
             tools=tools,
             memory=memory,
-            verbose=True,
-            return_intermediate_steps=False,
+            # verbose=True,
+            # return_intermediate_steps=True,
             max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "3"))
         )
 
@@ -91,7 +96,7 @@ class Agent:
         base_url = os.getenv("OPENAI_API_BASE")
         if self._is_azure(base_url):
             return AzureChatOpenAI(deployment_name=os.getenv("AZURE_DEPLOYMENT_NAME"), temperature=temperature,
-                                   verbose=True, streaming=True)
+                                   verbose=True, streaming=True, callbacks=[])  # ,callbacks=[RazonamientoCallback()]
         else:
             return ChatOpenAI(model_name=os.getenv("MODEL_NAME"), temperature=temperature, verbose=True, streaming=True)
 
@@ -118,20 +123,77 @@ class Agent:
         return ret.text
 
     async def ask(self, question: str) -> AsyncIterator[AgentFlow | str]:
-        callback = AsyncIteratorCallbackHandler()
-        task = asyncio.create_task(self._agent.arun(input=question, callbacks=[callback]))
-        resp = ""
-        async for token in callback.aiter():
-            resp += token
-            yield token
-        ret = await task
-        # when using tools tokens are not passed to the callback handler, so we need to get the response directly from
-        # agent run call
-        if ret != resp:
-            if ret.startswith("{\"steps\":"):
+        # Convertir el UUID de la sesión a str.
+        session_id = str(self._session.id)
+
+        try:
+            # Crear async callback para capturar los tokens generados por la tarea.
+            invoke_callback = AsyncIteratorCallbackHandler()
+
+            # Crear rutina (langchain) para preguntar al agente.
+            # TODO: Revisar .stream
+            invoke_coroutine = self._agent.ainvoke(input=question, config=RunnableConfig(callbacks=[invoke_callback]))
+
+            # Crear la tarea asyncio para ejecutar la rutina.
+            invoke_task = asyncio.create_task(invoke_coroutine)
+
+            # Crear el async iterator para capturar el resultado de la tarea.
+            invoke_async_iterator = invoke_callback.aiter()
+
+            notification_sent = False
+
+            try:
+                # Iterar por los resultados de la tarea, cuando se ejecute.
+                async for token in invoke_async_iterator:
+                    # print(f"  ----- SessionsRepository: {','.join(SessionsRepository.cancelled_sessions)}")
+                    if not notification_sent:
+                        notification_sent = True
+
+                    # Comprobar que el usuario no ha cancelado la sesión.
+                    if not SessionsRepository.is_session_cancelled(session_id):
+                        # Si no se ha cancelado se devuelve el token actual.
+
+                        print(f"  ► Token: {token}")
+
+                        # Generar un tipo básico (no modelo de pydantic) para optimizar la respuesta.
+                        yield MessageChunk(type="token", value=token)  # "value": re.sub(r'\n+', '\n', token)
+                    else:
+                        # Si se canceló, se interrumpe el iterador, se cancela la tarea y se interrumpe el loop.
+
+                        # Eliminar el identificador de la sesión actual de la lista de sesiones en cancelación.
+                        SessionsRepository.unregister_cancelled_session(session_id)
+
+                        print(
+                            f"  Session ID='{session_id}' has been cancelled. Closing iterator and cancelling task...")
+
+                        # Cerrar el iterador para no obtener más elementos de la tarea.
+                        await invoke_async_iterator.aclose()
+
+                        # Detener la tarea en ejecución.
+                        invoke_task.cancel()
+
+                        break
+            finally:
+                output = "No response"
+
                 try:
-                    yield AgentFlow.model_validate_json(ret)
-                except Exception as e:
-                    logging.exception("Error parsing agent response", e)
-                    yield ret
-            yield ret
+                    # Iniciar la tarea
+                    task_result = await invoke_task
+                    print("  ✅ Task result:\n", task_result)
+
+                    # Extraer la respuesta final del agente (TODO: buscar otro agente MRKL que devuelva razonamiento con la respuesta separada del razonamiento)
+                    output = task_result.get("output", "Final Answer: Empty").split("Final Answer:")[-1].strip()
+
+                    yield AgentFlow(steps=[AgentStep(action=AgentAction.MESSAGE, value=output)])
+                except asyncio.CancelledError as exc:
+                    print("  ► Received a CancelledError!")
+
+                    yield MessageChunk(type="event", value="cancellation")
+                finally:
+                    if SessionsRepository.is_session_cancelled(session_id):
+                        SessionsRepository.unregister_cancelled_session(session_id)
+
+        except Exception as exc:
+            # logging.exception("Error parsing agent response", exc)
+
+            yield MessageChunk(type="error", value=str(exc))
