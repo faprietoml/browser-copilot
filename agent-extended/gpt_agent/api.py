@@ -11,8 +11,18 @@ from sse_starlette.sse import ServerSentEvent
 
 from gpt_agent.agent import Agent, AgentAction
 from gpt_agent.auth import get_current_user
-from gpt_agent.domain import Session, Question, TranscriptionQuestion, SessionBase, MessageChunk
-from gpt_agent.file_system_repos import SessionsRepository, QuestionsRepository, TranscriptionsRepository
+from gpt_agent.domain import (
+    Session,
+    Question,
+    TranscriptionQuestion,
+    SessionBase,
+    MessageChunk,
+)
+from gpt_agent.file_system_repos import (
+    SessionsRepository,
+    QuestionsRepository,
+    TranscriptionsRepository,
+)
 
 logging.basicConfig()
 logger = logging.getLogger("gpt_agent")
@@ -20,39 +30,47 @@ logger.level = logging.DEBUG
 logging.getLogger().level = logging.DEBUG
 
 app = FastAPI()
-assets_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'assets')
+assets_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
 templates = Jinja2Templates(directory=assets_path)
 sessions_repo = SessionsRepository()
 questions_repo = QuestionsRepository()
 transcriptions_repo = TranscriptionsRepository()
 
 
-@app.get('/manifest.json')
+@app.get("/manifest.json")
 async def get_manifest(request: Request) -> Response:
-    return templates.TemplateResponse("manifest.json", {
-        "request": request,
-        "openid_url": os.getenv("MANIFEST_OPENID_URL", os.getenv("OPENID_URL")),
-        "openid_client_id": os.getenv("OPENID_CLIENT_ID"),
-        "openid_scope": os.getenv("OPENID_SCOPE"),
-        "contact_email": os.getenv("CONTACT_EMAIL")
-    }, media_type='application/json')
+    return templates.TemplateResponse(
+        "manifest.json",
+        {
+            "request": request,
+            "openid_url": os.getenv("MANIFEST_OPENID_URL", os.getenv("OPENID_URL")),
+            "openid_client_id": os.getenv("OPENID_CLIENT_ID"),
+            "openid_scope": os.getenv("OPENID_SCOPE"),
+            "contact_email": os.getenv("CONTACT_EMAIL"),
+        },
+        media_type="application/json",
+    )
 
 
-@app.get('/logo.png')
+@app.get("/logo.png")
 async def get_logo() -> FileResponse:
-    return FileResponse(os.path.join(assets_path, 'logo.png'))
+    return FileResponse(os.path.join(assets_path, "logo.png"))
 
 
-@app.post('/sessions', status_code=status.HTTP_201_CREATED)
-async def create_session(req: SessionBase, user: Annotated[str, Depends(get_current_user)]) -> Session:
+@app.post("/sessions", status_code=status.HTTP_201_CREATED)
+async def create_session(
+    req: SessionBase, user: Annotated[str, Depends(get_current_user)]
+) -> Session:
     ret = Session(**req.model_dump(), user=user)
     await sessions_repo.save_session(ret)
     Agent(ret).start_session()
     return ret
 
 
-@app.post('/sessions/{session_id}/cancel')
-async def cancel_task(session_id: str, user: Annotated[str, Depends(get_current_user)]) -> Session:
+@app.post("/sessions/{session_id}/cancel")
+async def cancel_task(
+    session_id: str, user: Annotated[str, Depends(get_current_user)]
+) -> Session:
     logger.debug(f"Received a request to cancel a session with ID='{session_id}'...")
 
     session = await _find_session(session_id, user)
@@ -60,7 +78,7 @@ async def cancel_task(session_id: str, user: Annotated[str, Depends(get_current_
 
     # Registra el identificador de la sesión en el repositorio para que el agente pueda validar que hay una cancelación en proceso.
     SessionsRepository.register_cancelled_session(session_id)
-    logger.debug(f"Added {session_id} to cancelled sessions list.")
+    logger.debug(f"Added ID='{session_id}' to cancelled sessions list.")
 
     # TODO: empty response
     return session
@@ -70,27 +88,36 @@ class QuestionRequest(BaseModel):
     question: Optional[str] = ""
 
 
-@app.post('/sessions/{session_id}/questions')
+@app.post("/sessions/{session_id}/questions")
 async def answer_question(
-        session_id: str, req: QuestionRequest, user: Annotated[str, Depends(get_current_user)]) -> StreamingResponse:
+    session_id: str,
+    req: QuestionRequest,
+    user: Annotated[str, Depends(get_current_user)],
+) -> StreamingResponse:
     session = await _find_session(session_id, user)
     # This copilot uses response streaming which allows users to start get a response as soon as
     # possible, which is particularly important when interacting with LLMs that support response
     # streaming and may take some time to end answering a given response.
     # If you don't want to use response streaming you can just return a pydantic object like in
     # create session endpoint.
-    return StreamingResponse(agent_response_stream(req, session), media_type="text/event-stream")
+    return StreamingResponse(
+        agent_response_stream(req, session), media_type="text/event-stream"
+    )
 
 
 async def _find_session(session_id: str, user: str) -> Session:
     ret = await sessions_repo.find_session(session_id)
     if not ret or ret.user != user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f'session {session_id} not found')
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"session {session_id} not found",
+        )
     return ret
 
 
-async def agent_response_stream(req: QuestionRequest, session: Session) -> AsyncIterator[bytes]:
+async def agent_response_stream(
+    req: QuestionRequest, session: Session
+) -> AsyncIterator[bytes]:
     try:
         answer_stream = Agent(session).ask(req.question)
         complete_answer = ""
@@ -115,7 +142,9 @@ async def agent_response_stream(req: QuestionRequest, session: Session) -> Async
             complete_answer += item_str
 
         # Persistir la pregunta/respuesta en la sesión.
-        question_model = Question(question=req.question, answer=complete_answer, session=session)
+        question_model = Question(
+            question=req.question, answer=complete_answer, session=session
+        )
         await questions_repo.save_question(question_model)
     except Exception as e:
         traceback.print_exception(e)
@@ -130,9 +159,12 @@ class TranscriptionResponse(BaseModel):
     text: str
 
 
-@app.post('/sessions/{session_id}/transcriptions')
-async def answer_transcription(session_id: str, req: TranscriptionRequest,
-                               user: Annotated[str, Depends(get_current_user)]) -> TranscriptionResponse:
+@app.post("/sessions/{session_id}/transcriptions")
+async def answer_transcription(
+    session_id: str,
+    req: TranscriptionRequest,
+    user: Annotated[str, Depends(get_current_user)],
+) -> TranscriptionResponse:
     session = await _find_session(session_id, user)
     ret = TranscriptionQuestion(base64=req.file, session=session)
     audio_file_path = await transcriptions_repo.save_audio(ret)
