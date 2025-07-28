@@ -22,6 +22,8 @@ Here are a few examples of what these copilots can do:
 2. Open the extension by clicking on its icon and add a new copilot by providing its base URL. The base URL should correspond to the location of `manifest.json` and `logo.png`, for example: `http://localhost:8000` if your agent is running locally.
 3. Start a new chat by clicking on a configured copilot, or, if the copilot has automatic activation, just use your browser and the copilot chat will automatically appear when the copilot activates.
 4. Save your preferred prompts directly from the chat. To quickly access them later, simply type '/' in the chat input.
+5. Access the reasoning process captured in the collapsible element within the chat.
+6. Stop preprocessing of the LLM response while receiving it using the action button.
 
 At any point, you can close the copilot to later resume the conversation by the extension icon or right-clicking on the page and selecting `Toggle Browser Copilot`.
 
@@ -77,6 +79,9 @@ To build the final distribution of the extension, execute the following command:
 ```bash
 devbox run build
 ```
+
+### Test
+Run tests on the agent using [pytest](https://docs.pytest.org/en/stable/). The [test_agent.py](./agent-extended/gpt_agent/test_agent.py) file contains an example of how to implement asynchronous requests to the agent.
 
 ## Contributing
 
